@@ -32,14 +32,16 @@ def get_rag():
     return _rag
 
 
-def respond(message: str, history: list):
+def respond(message: str, history: list | None):
+    # Gradio 6+: Chatbot dùng list[dict] với keys role / content
+    hist = list(history) if history is not None else []
     message = (message or "").strip()
     if not message:
-        return history, ""
+        return hist, ""
     t0 = time.perf_counter()
     try:
         rag = get_rag()
-        reply, sources = rag.answer(message, history)
+        reply, sources = rag.answer(message, hist)
     except Exception as e:
         reply = f"Lỗi: {e}"
         sources = ""
@@ -49,15 +51,15 @@ def respond(message: str, history: list):
         reply = f"{reply}\n\n{sources}{footer}"
     else:
         reply = f"{reply}{footer}"
-    history = history + [(message, reply)]
-    return history, ""
+    hist = hist + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": reply},
+    ]
+    return hist, ""
 
 
 def build_ui():
-    with gr.Blocks(
-        title="Holistic Way — Trợ lý dữ liệu",
-        theme=gr.themes.Soft(primary_hue="emerald"),
-    ) as demo:
+    with gr.Blocks(title="Holistic Way — Trợ lý dữ liệu") as demo:
         gr.Markdown(
             """
             ## Holistic Way — Chatbot (Gemini + RAG)
@@ -65,6 +67,10 @@ def build_ui():
             Đặt `GEMINI_API_KEY` trong `.env` và chạy `python ingest.py` trước lần đầu.
             """
         )
+        # Lưu session chat ngay trên giao diện (ưu tiên lưu ở trình duyệt nếu Gradio hỗ trợ)
+        SessionState = getattr(gr, "BrowserState", gr.State)
+        session_history = SessionState([])
+
         chat = gr.Chatbot(label="Trò chuyện", height=480)
         with gr.Row():
             box = gr.Textbox(
@@ -73,16 +79,34 @@ def build_ui():
                 show_label=False,
             )
             send = gr.Button("Gửi", variant="primary", scale=1)
+            clear = gr.Button("Xóa chat", variant="secondary", scale=1)
 
-        def on_msg(msg, hist):
-            return respond(msg, hist)
+        def on_load(hist):
+            # Đồng bộ lịch sử từ state → Chatbot khi tải UI
+            return list(hist or [])
 
-        send.click(on_msg, [box, chat], [chat, box])
-        box.submit(on_msg, [box, chat], [chat, box])
+        def on_msg(msg, hist, sess_hist):
+            # Chatbot tự giữ state theo session, nhưng ta mirror thêm vào session_history
+            new_hist, cleared = respond(msg, hist)
+            return new_hist, cleared, new_hist
+
+        def on_clear():
+            return [], []
+
+        demo.load(on_load, [session_history], [chat])
+
+        send.click(on_msg, [box, chat, session_history], [chat, box, session_history])
+        box.submit(on_msg, [box, chat, session_history], [chat, box, session_history])
+        clear.click(on_clear, [], [chat, session_history])
 
     return demo
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "7860"))
-    build_ui().launch(server_name="0.0.0.0", server_port=port)
+    build_ui().launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        theme=gr.themes.Soft(primary_hue="emerald"),
+        share=True,
+    )

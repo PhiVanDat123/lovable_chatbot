@@ -1,5 +1,5 @@
 """
-Tạo index vector cục bộ (Google text-embedding-004) từ CSV + 2 file DOCX.
+Tạo index vector cục bộ (Gemini API: gemini-embedding-001) từ CSV + 2 file DOCX.
 Chạy: python ingest.py
 """
 from __future__ import annotations
@@ -7,6 +7,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from holistic_rag.config import (
+    EMBED_BATCH_DELAY_SEC,
+    EMBED_BATCH_SIZE,
     EMBED_MODEL,
     GEMINI_API_KEY,
     INDEX_DIR,
@@ -37,10 +39,19 @@ def main() -> None:
     if not chunks:
         raise SystemExit("Không tạo được chunk nào từ dữ liệu.")
 
-    print(f"Đang embed {len(chunks)} chunk bằng {EMBED_MODEL}...")
+    print(
+        f"Dang embed {len(chunks)} chunk bang {EMBED_MODEL} "
+        f"(batch_size={EMBED_BATCH_SIZE})..."
+    )
     client = get_client(GEMINI_API_KEY)
     texts = [c["text"] for c in chunks]
-    vectors = embed_texts(client, EMBED_MODEL, texts, batch_size=32)
+    vectors = embed_texts(
+        client,
+        EMBED_MODEL,
+        texts,
+        batch_size=EMBED_BATCH_SIZE,
+        delay_sec=EMBED_BATCH_DELAY_SEC,
+    )
     save_index(INDEX_DIR, chunks, vectors)
     print(f"Đã lưu index tại: {INDEX_DIR.resolve()}")
 

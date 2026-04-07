@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from google import genai
 
 
@@ -7,7 +9,13 @@ def get_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def embed_texts(client: genai.Client, model: str, texts: list[str], batch_size: int = 64) -> list[list[float]]:
+def embed_texts(
+    client: genai.Client,
+    model: str,
+    texts: list[str],
+    batch_size: int = 8,
+    delay_sec: float = 0.0,
+) -> list[list[float]]:
     if not texts:
         return []
     all_vals: list[list[float]] = []
@@ -24,4 +32,6 @@ def embed_texts(client: genai.Client, model: str, texts: list[str], batch_size: 
             if vals is None:
                 raise RuntimeError("Thiếu field values trong embedding response.")
             all_vals.append(list(vals))
+        if delay_sec > 0 and i + batch_size < len(texts):
+            time.sleep(delay_sec)
     return all_vals

@@ -96,8 +96,10 @@ Mở trình duyệt tại địa chỉ hiển thị trong terminal (mặc địn
 Trong `.env`:
 
 - `CHAT_MODEL` — mặc định `gemini-2.0-flash` (nhanh, phù hợp chat)
-- `EMBED_MODEL` — mặc định `text-embedding-004`
+- `EMBED_MODEL` — mặc định `gemini-embedding-001` (Gemini API; `text-embedding-004` là Vertex AI)
 - `TOP_K` — số đoạn ngữ cảnh đưa vào prompt (mặc định `10`)
+- `EMBED_BATCH_SIZE` — số chunk mỗi lần gọi embedding trong `ingest.py` (mặc định `8`; thử `4` nếu vẫn 429)
+- `EMBED_BATCH_DELAY_SEC` — nghỉ (giây) giữa các batch (mặc định `0`; thử `0.5`–`1.5` nếu còn 429)
 
 ### Vector backend: Firestore
 
@@ -151,6 +153,7 @@ chatbot/
 | `Thiếu GEMINI_API_KEY` | Kiểm tra file `.env` cùng thư mục với `app.py` / `ingest.py`. |
 | `Chưa có vector index` | Chạy `python ingest.py` trước `python app.py`. |
 | `Không tìm thấy file` | Sửa `PRODUCTS_CSV`, `POLICY_DOCX`, `NUTRITION_DOCX` trong `.env`; Windows có thể dùng `C:/Users/...` hoặc `\\`. |
+| `404` / `models/text-embedding-004 is not found` khi `ingest.py` | Bạn đang dùng **Gemini API** (AI Studio). Đặt `EMBED_MODEL=gemini-embedding-001` trong `.env`. `text-embedding-004` dành cho **Vertex AI**, không dùng với `GEMINI_API_KEY`. |
 | Lỗi rate limit / quota API | Giảm tần suất gọi, hoặc chờ reset quota; `ingest.py` gọi batch embedding. |
 | Firestore vector lỗi | Đảm bảo đã tạo vector index đúng field `embedding` và đã chạy `scripts/firestore_ingest.py`. |
 
