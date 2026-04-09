@@ -237,10 +237,14 @@ if not allowed_origins:
     # Dev-friendly default; set CORS_ORIGINS in production.
     allowed_origins = ["*"]
 
+# Starlette: allow_credentials=True với allow_origins=["*"] KHÔNG gửi Access-Control-Allow-Origin
+# → trình duyệt chặn CORS. Chỉ bật credentials khi liệt kê origin cụ thể.
+_use_wildcard_cors = allowed_origins == ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_credentials=not _use_wildcard_cors,
     allow_methods=["*"],
     allow_headers=["*"],
 )
