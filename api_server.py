@@ -13,12 +13,14 @@ POST /api/chat
 from __future__ import annotations
 
 import os
+import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -35,6 +37,21 @@ class ChatResponse(BaseModel):
     sources: str | None = None
 
 
+class Product(BaseModel):
+    id: str
+    name: str
+    category: str | None = None
+    description: str | None = None
+    price_sgd: float | None = None
+    promo_price_sgd: float | None = None
+    product_link: str | None = None
+
+
+class ProductListResponse(BaseModel):
+    total: int
+    items: list[Product]
+
+
 @dataclass
 class SessionState:
     history: list[dict[str, str]]
@@ -43,6 +60,11 @@ class SessionState:
 
 _rag = None
 _sessions: dict[str, SessionState] = {}
+
+# Product catalog cache (CSV -> normalized list)
+_products_cache: list[Product] | None = None
+_products_by_id: dict[str, Product] | None = None
+_products_mtime: float | None = None
 
 # Session memory limits (in-memory). For production, consider Redis.
 _MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "2000"))
@@ -106,6 +128,107 @@ def _require_api_key(x_api_key: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def _slugify(text: str) -> str:
+    t = unicodedata.normalize("NFKD", (text or "").strip())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = t.lower()
+    t = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+    return t or "item"
+
+
+def _to_float(v) -> float | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _load_products_from_csv() -> tuple[list[Product], dict[str, Product]]:
+    from holistic_rag.config import PRODUCTS_CSV
+
+    if not PRODUCTS_CSV:
+        raise HTTPException(status_code=500, detail="Missing PRODUCTS_CSV")
+    if not PRODUCTS_CSV.is_file():
+        raise HTTPException(status_code=500, detail=f"PRODUCTS_CSV not found: {PRODUCTS_CSV}")
+
+    import pandas as pd
+
+    df = pd.read_csv(PRODUCTS_CSV)
+    # Expected columns (best effort):
+    # Products, Category, Discounted Price (SGD $), Price (SGD $), Description, Product Link
+    col_name = next((c for c in df.columns if c.strip().lower() in {"products", "product"}), None)
+    if not col_name:
+        raise HTTPException(status_code=500, detail=f"CSV missing product name column in {list(df.columns)}")
+
+    col_category = next((c for c in df.columns if c.strip().lower() == "category"), None)
+    col_promo = next((c for c in df.columns if "discount" in c.lower()), None)
+    col_price = next((c for c in df.columns if c.strip().lower().startswith("price")), None)
+    col_desc = next((c for c in df.columns if c.strip().lower() == "description"), None)
+    col_link = next((c for c in df.columns if "link" in c.lower()), None)
+
+    products: list[Product] = []
+    by_id: dict[str, Product] = {}
+
+    for _, row in df.iterrows():
+        name = str(row.get(col_name) or "").strip()
+        if not name:
+            continue
+        category = str(row.get(col_category) or "").strip() if col_category else ""
+        description = str(row.get(col_desc) or "").strip() if col_desc else ""
+        link = str(row.get(col_link) or "").strip() if col_link else ""
+
+        price = _to_float(row.get(col_price)) if col_price else None
+        promo = _to_float(row.get(col_promo)) if col_promo else None
+
+        base = _slugify(name)
+        # Avoid collisions when CSV has repeated names (e.g. bundles)
+        suffix = _slugify(link)[:24] if link else ""
+        pid = base if not suffix else f"{base}-{suffix}"
+        # Ensure uniqueness
+        if pid in by_id:
+            i = 2
+            while f"{pid}-{i}" in by_id:
+                i += 1
+            pid = f"{pid}-{i}"
+
+        p = Product(
+            id=pid,
+            name=name,
+            category=category or None,
+            description=description or None,
+            price_sgd=price,
+            promo_price_sgd=promo,
+            product_link=link or None,
+        )
+        products.append(p)
+        by_id[p.id] = p
+
+    # Stable default ordering: category then name
+    products.sort(key=lambda x: ((x.category or "").lower(), x.name.lower()))
+    return products, by_id
+
+
+def _get_products_cached() -> tuple[list[Product], dict[str, Product]]:
+    global _products_cache, _products_by_id, _products_mtime
+    from holistic_rag.config import PRODUCTS_CSV
+
+    if not PRODUCTS_CSV or not PRODUCTS_CSV.is_file():
+        raise HTTPException(status_code=500, detail="PRODUCTS_CSV is not configured or missing")
+
+    mtime = PRODUCTS_CSV.stat().st_mtime
+    if _products_cache is None or _products_by_id is None or _products_mtime != mtime:
+        products, by_id = _load_products_from_csv()
+        _products_cache = products
+        _products_by_id = by_id
+        _products_mtime = mtime
+    return _products_cache, _products_by_id
+
+
 app = FastAPI(title="Holistic Way API", version="1.0.0")
 
 allowed_origins_env = (os.getenv("CORS_ORIGINS") or "").strip()
@@ -126,6 +249,61 @@ app.add_middleware(
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     return {"ok": True}
+
+
+@app.get("/api/products", response_model=ProductListResponse)
+def list_products(
+    q: str | None = Query(default=None, description="Search query for product name/description"),
+    category: str | None = Query(default=None, description="Filter by category (exact match)"),
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
+) -> ProductListResponse:
+    _require_api_key(x_api_key)
+
+    products, _ = _get_products_cached()
+    items = products
+
+    if category:
+        cat_norm = category.strip().lower()
+        items = [p for p in items if (p.category or "").strip().lower() == cat_norm]
+
+    if q:
+        qn = q.strip().lower()
+        if qn:
+            items = [
+                p
+                for p in items
+                if (qn in p.name.lower())
+                or (p.description is not None and qn in p.description.lower())
+            ]
+
+    def effective_price(p: Product) -> float | None:
+        return p.promo_price_sgd if p.promo_price_sgd is not None else p.price_sgd
+
+    if min_price is not None:
+        items = [p for p in items if (effective_price(p) is not None and effective_price(p) >= min_price)]
+    if max_price is not None:
+        items = [p for p in items if (effective_price(p) is not None and effective_price(p) <= max_price)]
+
+    total = len(items)
+    page = items[offset : offset + limit]
+    return ProductListResponse(total=total, items=page)
+
+
+@app.get("/api/products/{product_id}", response_model=Product)
+def get_product(
+    product_id: str,
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
+) -> Product:
+    _require_api_key(x_api_key)
+    _, by_id = _get_products_cached()
+    p = by_id.get(product_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return p
 
 
 @app.post("/api/chat", response_model=ChatResponse)
