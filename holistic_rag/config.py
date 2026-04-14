@@ -18,8 +18,9 @@ CHAT_MAX_OUTPUT_TOKENS = max(
 )
 # Gemini API (AI Studio): dùng gemini-embedding-001. text-embedding-004 là Vertex AI.
 EMBED_MODEL = os.getenv("EMBED_MODEL", "gemini-embedding-001")
-# TOP_K nhỏ → prompt ngắn → generate nhanh hơn
-TOP_K = max(1, min(25, int(os.getenv("TOP_K", "6"))))
+# Số chunk RAG đưa vào prompt. Mặc định 10: cân bằng recall (câu gộp SP + chính sách) với độ dài prompt.
+# Giảm xuống 6–8 nếu ưu tiên latency; tăng tới 12–15 nếu vẫn thiếu ngữ cảnh (tối đa 25).
+TOP_K = max(1, min(25, int(os.getenv("TOP_K", "10"))))
 # Ingest: batch nhỏ giúp tránh 429 (rate limit) khi embed nhiều chunk
 EMBED_BATCH_SIZE = max(1, int(os.getenv("EMBED_BATCH_SIZE", "8")))
 EMBED_BATCH_DELAY_SEC = float(os.getenv("EMBED_BATCH_DELAY_SEC", "0"))
